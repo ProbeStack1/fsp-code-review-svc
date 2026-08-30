@@ -35,9 +35,9 @@ ENV PORT=8080
 # Expose the port
 EXPOSE ${PORT}
 
-# Health check — actuator sits under the server.servlet.context-path (/code-review/v1)
+# Health check — actuator sits under the server.servlet.context-path (/code-review)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/code-review/v1/actuator/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/code-review/actuator/health || exit 1
 
 # Run the application.
 #
