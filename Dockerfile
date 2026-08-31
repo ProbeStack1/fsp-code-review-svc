@@ -47,3 +47,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
 # ExitOnOutOfMemoryError: an instance that has exhausted its heap cannot serve anything useful, and
 #   left alive it lingers behind the load balancer returning 502s. Exiting lets Cloud Run replace it.
 ENTRYPOINT ["sh", "-c", "java -XX:MaxRAMPercentage=70.0 -XX:+ExitOnOutOfMemoryError -jar -Dserver.port=${PORT} app.jar"]
+
