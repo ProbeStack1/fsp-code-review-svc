@@ -1,5 +1,7 @@
 package com.probestack.forgesphere.codereview.client;
 
+import java.util.List;
+
 /**
  * Transient carrier for the slice of a microservice's CI/CD configuration
  * this service needs on a single request. Fetched fresh from
@@ -11,16 +13,22 @@ package com.probestack.forgesphere.codereview.client;
  * {@code CodeReviewRecord}, never logged.</p>
  */
 public record ScmDetails(
-        String owner,           // GitHub org / user (scm.orgUser)
-        String token,           // decrypted PAT — transient, never stored
-        Long reviewTeamId,
-        String reviewTeamSlug,  // what GitHub's requested_reviewers API expects
-        String reviewTeamName,
-        String sourceBranch,    // default strategy branch tagged "dev"
-        String targetBranch,    // default strategy branch tagged "merge"
-        String mergeMethod      // github merge method: merge | squash | rebase
+        String owner,               // GitHub org / user (scm.orgUser)
+        String token,               // decrypted PAT — transient, never stored
+        List<TeamRef> reviewTeams,  // every team the CI/CD SCM step marked for code review
+        Integer minApprovals,       // CI/CD-configured minimum approving reviews (null → service default)
+        String sourceBranch,        // default strategy branch tagged "dev"
+        String targetBranch,        // default strategy branch tagged "merge"
+        String mergeMethod          // github merge method: merge | squash | rebase
 ) {
     public boolean hasReviewTeam() {
-        return reviewTeamSlug != null && !reviewTeamSlug.isBlank();
+        return reviewTeams != null && !reviewTeams.isEmpty();
+    }
+
+    /** One marked code-review team. */
+    public record TeamRef(Long id, String slug, String name) {
+        public String displayName() {
+            return name != null && !name.isBlank() ? name : slug;
+        }
     }
 }

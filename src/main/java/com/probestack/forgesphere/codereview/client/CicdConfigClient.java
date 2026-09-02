@@ -13,6 +13,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -123,12 +124,27 @@ public class CicdConfigClient {
         return new ScmDetails(
                 owner,
                 token,
-                asLong(scm.get("reviewTeamId")),
-                str(scm.get("reviewTeamSlug")),
-                str(scm.get("reviewTeamName")),
+                parseReviewTeams(scm),
+                asInteger(scm.get("minApprovals")),
                 sourceBranch,
                 targetBranch,
                 mergeMethod);
+    }
+
+    /** The {@code scm.reviewTeams[]} the CI/CD SCM step marked as code reviewers. */
+    private static List<ScmDetails.TeamRef> parseReviewTeams(Map<String, Object> scm) {
+        List<ScmDetails.TeamRef> out = new ArrayList<>();
+        List<Map<String, Object>> raw = asList(scm.get("reviewTeams"));
+        if (raw != null) {
+            for (Map<String, Object> t : raw) {
+                if (t == null) continue;
+                String slug = str(t.get("slug"));
+                if (isBlank(slug)) continue;
+                boolean dup = out.stream().anyMatch(e -> slug.equalsIgnoreCase(e.slug()));
+                if (!dup) out.add(new ScmDetails.TeamRef(asLong(t.get("id")), slug, str(t.get("name"))));
+            }
+        }
+        return out;
     }
 
     // ── mapping helpers ──────────────────────────────────────────────────
@@ -158,6 +174,18 @@ public class CicdConfigClient {
 
     private static Long asLong(Object o) {
         return o instanceof Number n ? n.longValue() : null;
+    }
+
+    private static Integer asInteger(Object o) {
+        if (o instanceof Number n) return n.intValue();
+        if (o instanceof String s && !s.isBlank()) {
+            try {
+                return Integer.parseInt(s.trim());
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static boolean isBlank(String s) {

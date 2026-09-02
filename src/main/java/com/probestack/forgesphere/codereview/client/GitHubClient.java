@@ -102,6 +102,19 @@ public class GitHubClient {
         return put("/repos/" + owner + "/" + repo + "/pulls/" + prNumber + "/merge", token, payload, "merge pull request");
     }
 
+    /** PATCH /repos/{owner}/{repo}/pulls/{number} — close without merging. */
+    public Map<String, Object> closePullRequest(String owner, String repo, String token, int prNumber) {
+        return exchangeObject(HttpMethod.PATCH,
+                "/repos/" + owner + "/" + repo + "/pulls/" + prNumber, token,
+                Map.of("state", "closed"), "close pull request");
+    }
+
+    /** POST /repos/{owner}/{repo}/issues/{number}/comments — add a conversation comment. */
+    public Map<String, Object> addIssueComment(String owner, String repo, String token, int prNumber, String body) {
+        return post("/repos/" + owner + "/" + repo + "/issues/" + prNumber + "/comments",
+                token, Map.of("body", body), "add comment");
+    }
+
     // ── transport ──────────────────────────────────────────────────────
 
     private Map<String, Object> post(String path, String token, Object body, String action) {

@@ -1,6 +1,7 @@
 package com.probestack.forgesphere.codereview.api;
 
 import com.probestack.forgesphere.codereview.document.CodeReviewRecord;
+import com.probestack.forgesphere.codereview.model.AddCommentRequest;
 import com.probestack.forgesphere.codereview.model.CreatePullRequestRequest;
 import com.probestack.forgesphere.codereview.service.CodeReviewService;
 import jakarta.validation.Valid;
@@ -64,5 +65,24 @@ public class CodeReviewController {
             @RequestHeader(value = USER_EMAIL, required = false) String userEmail,
             @RequestHeader(value = USER_ROLE, required = false) String userRole) {
         return ResponseEntity.ok(service.merge(microserviceId, userEmail, userRole));
+    }
+
+    /** Close the current PR without merging (requester or org admin). Frees a new one to be raised. */
+    @PostMapping("/{microserviceId}/close")
+    public ResponseEntity<CodeReviewRecord> close(
+            @PathVariable String microserviceId,
+            @RequestHeader(value = USER_EMAIL, required = false) String userEmail,
+            @RequestHeader(value = USER_ROLE, required = false) String userRole) {
+        return ResponseEntity.ok(service.close(microserviceId, userEmail, userRole));
+    }
+
+    /** Post a conversation comment on the current PR (mirrored to GitHub as the calling user). */
+    @PostMapping("/{microserviceId}/comment")
+    public ResponseEntity<CodeReviewRecord> comment(
+            @PathVariable String microserviceId,
+            @Valid @RequestBody AddCommentRequest request,
+            @RequestHeader(value = USER_EMAIL, required = false) String userEmail,
+            @RequestHeader(value = USER_ROLE, required = false) String userRole) {
+        return ResponseEntity.ok(service.addComment(microserviceId, userEmail, userRole, request.getBody()));
     }
 }

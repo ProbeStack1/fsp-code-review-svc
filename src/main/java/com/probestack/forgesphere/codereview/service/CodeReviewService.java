@@ -53,6 +53,15 @@ public class CodeReviewService {
     private static final String MERGING = "MERGING";
     private static final String MERGE_FAILED = "MERGE_FAILED";
 
+    /**
+     * GitHub {@code mergeable_state} values that still allow a merge. {@code clean}
+     * is all-green; {@code unstable} means only non-required checks are failing/pending
+     * (GitHub itself keeps the merge button enabled); {@code has_hooks} is clean with
+     * pre-receive hooks configured. Everything else — {@code dirty}, {@code blocked},
+     * {@code behind}, {@code draft}, {@code unknown} — is not mergeable from here.
+     */
+    private static final Set<String> MERGEABLE_STATES = Set.of("clean", "unstable", "has_hooks");
+
     private final CodeReviewRecordRepository repository;
     private final CicdConfigClient cicdConfigClient;
     private final GitHubClient gitHubClient;
@@ -129,11 +138,11 @@ public class CodeReviewService {
         rec.setPullRequestUrl(str(ghPr.get("html_url")));
         rec.setPullRequestState("OPEN");
         rec.setHeadSha(nestedString(ghPr, "head", "sha"));
-        rec.setReviewTeamId(scm.reviewTeamId());
-        rec.setReviewTeamSlug(scm.reviewTeamSlug());
-        rec.setReviewTeamName(scm.reviewTeamName());
-        rec.setMinApprovals(req.getMinApprovals() != null && req.getMinApprovals() >= 1
-                ? req.getMinApprovals() : defaultMinApprovals);
+        List<ScmDetails.TeamRef> teams = scm.reviewTeams() != null ? scm.reviewTeams() : List.of();
+        rec.setReviewTeams(teams.stream()
+                .map(t -> new CodeReviewRecord.ReviewTeamRef(t.id(), t.slug(), t.name()))
+                .collect(Collectors.toList()));
+        rec.setMinApprovals(resolveMinApprovals(scm.minApprovals(), req.getMinApprovals()));
         rec.setReviewStatus(PENDING_REVIEW);
         rec.setMergeStatus(NOT_READY);
         rec.setCreatedBy(userEmail);
@@ -157,26 +166,45 @@ public class CodeReviewService {
         return saved;
     }
 
+    /** Request a review from every team the CI/CD SCM step marked. Partial success is fine. */
     private void requestTeamReview(CodeReviewRecord rec, ScmDetails scm) {
-        if (!scm.hasReviewTeam()) {
+        List<ScmDetails.TeamRef> teams = scm.reviewTeams();
+        if (teams == null || teams.isEmpty()) {
             rec.setTeamReviewRequested(false);
             rec.setTeamReviewNote("No review team is configured in CI/CD. Add reviewers manually on the pull request.");
             addEvent(rec, "NO_REVIEW_TEAM", null, rec.getTeamReviewNote(), Instant.now());
             return;
         }
-        try {
-            gitHubClient.requestTeamReviewers(rec.getRepositoryOwner(), rec.getRepositoryName(),
-                    scm.token(), rec.getPullRequestNumber(), scm.reviewTeamSlug());
-            rec.setTeamReviewRequested(true);
-            addEvent(rec, "TEAM_REVIEW_REQUESTED", null,
-                    "Requested review from team " + defaultString(scm.reviewTeamName(), scm.reviewTeamSlug()),
-                    Instant.now());
-        } catch (ResponseStatusException e) {
-            rec.setTeamReviewRequested(false);
-            rec.setTeamReviewNote("Could not assign team '" + scm.reviewTeamSlug() + "': " + e.getReason());
-            addEvent(rec, "TEAM_REVIEW_REQUEST_FAILED", null, rec.getTeamReviewNote(), Instant.now());
-            log.warn("Team-reviewer request failed for PR #{}: {}", rec.getPullRequestNumber(), e.getReason());
+        List<String> ok = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        for (ScmDetails.TeamRef team : teams) {
+            try {
+                gitHubClient.requestTeamReviewers(rec.getRepositoryOwner(), rec.getRepositoryName(),
+                        scm.token(), rec.getPullRequestNumber(), team.slug());
+                ok.add(team.displayName());
+            } catch (ResponseStatusException e) {
+                failed.add(team.slug() + " (" + e.getReason() + ")");
+                log.warn("Team-reviewer request failed for PR #{} team {}: {}",
+                        rec.getPullRequestNumber(), team.slug(), e.getReason());
+            }
         }
+        rec.setTeamReviewRequested(!ok.isEmpty());
+        if (!ok.isEmpty()) {
+            addEvent(rec, "TEAM_REVIEW_REQUESTED", null,
+                    "Requested review from team" + (ok.size() > 1 ? "s " : " ") + String.join(", ", ok),
+                    Instant.now());
+        }
+        if (!failed.isEmpty()) {
+            rec.setTeamReviewNote("Could not assign: " + String.join("; ", failed));
+            addEvent(rec, "TEAM_REVIEW_REQUEST_FAILED", null, rec.getTeamReviewNote(), Instant.now());
+        }
+    }
+
+    /** CI/CD-configured minimum wins; else the value passed on the request; else the service default. */
+    private int resolveMinApprovals(Integer fromConfig, Integer fromRequest) {
+        if (fromConfig != null && fromConfig >= 1) return fromConfig;
+        if (fromRequest != null && fromRequest >= 1) return fromRequest;
+        return defaultMinApprovals;
     }
 
     // ── read (+ sync) ──────────────────────────────────────────────────
@@ -239,11 +267,10 @@ public class CodeReviewService {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "Waiting for approvals (" + rec.getApprovedBy().size() + "/" + rec.getMinApprovals() + ").");
         }
-        if (!"clean".equalsIgnoreCase(rec.getMergeableState())) {
+        String mergeableState = defaultString(rec.getMergeableState(), "unknown").toLowerCase();
+        if (!MERGEABLE_STATES.contains(mergeableState)) {
             repository.save(rec);
-            throw new ResponseStatusException(HttpStatus.CONFLICT,
-                    "GitHub reports this pull request is not mergeable (state: "
-                            + defaultString(rec.getMergeableState(), "unknown") + ").");
+            throw new ResponseStatusException(HttpStatus.CONFLICT, mergeBlockReason(mergeableState));
         }
 
         rec.setMergeStatus(MERGING);
@@ -283,6 +310,87 @@ public class CodeReviewService {
             }
             throw e;
         }
+    }
+
+    // ── close (without merging) ────────────────────────────────────────
+
+    public CodeReviewRecord close(String microserviceId, String userEmail, String userRole) {
+        requireEmail(userEmail);
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No pull request has been created for this microservice yet."));
+
+        if (TERMINAL.contains(rec.getReviewStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This pull request is already " + rec.getReviewStatus().toLowerCase() + ".");
+        }
+        boolean isOwner = userEmail.equalsIgnoreCase(rec.getCreatedBy());
+        if (!isOwner && !isOrgAdmin(userRole)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "Only the developer who raised this pull request, or an org admin, can close it.");
+        }
+
+        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+        try {
+            gitHubClient.closePullRequest(rec.getRepositoryOwner(), rec.getRepositoryName(),
+                    scm.token(), rec.getPullRequestNumber());
+        } catch (ResponseStatusException e) {
+            throw e;
+        }
+        Instant now = Instant.now();
+        rec.setReviewStatus(CLOSED);
+        rec.setMergeStatus(NOT_READY);
+        rec.setPullRequestState("CLOSED");
+        addEvent(rec, "CLOSED_VIA_PLATFORM", userEmail, "Pull request closed without merging", now);
+        rec.setLastSyncedAt(now);
+        rec.setUpdatedAt(now);
+        return repository.save(rec);
+    }
+
+    // ── comment ───────────────────────────────────────────────────────
+
+    /** Post a conversation comment on the current PR as the calling user, then sync it back. */
+    public CodeReviewRecord addComment(String microserviceId, String userEmail, String userRole, String body) {
+        requireEmail(userEmail);
+        if (body == null || body.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Comment body is required.");
+        }
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+                .orElseThrow(() -> new ResourceNotFoundException(
+                        "No pull request has been created for this microservice yet."));
+        if (MERGED.equals(rec.getReviewStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT,
+                    "This pull request is already merged.");
+        }
+
+        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+        gitHubClient.addIssueComment(rec.getRepositoryOwner(), rec.getRepositoryName(),
+                scm.token(), rec.getPullRequestNumber(), body.strip());
+
+        Instant now = Instant.now();
+        addEvent(rec, "COMMENT_ADDED", userEmail, body.strip(), now);
+        rec.setUpdatedAt(now);
+        try {
+            reconcile(rec, scm);
+        } catch (RuntimeException e) {
+            log.warn("Post-comment sync for PR #{} failed: {}", rec.getPullRequestNumber(), e.getMessage());
+        }
+        return repository.save(rec);
+    }
+
+    private static String mergeBlockReason(String mergeableState) {
+        return switch (mergeableState) {
+            case "dirty" -> "This pull request has merge conflicts with the target branch. "
+                    + "Resolve the conflicts on GitHub, then retry.";
+            case "behind" -> "The source branch is out of date with the target branch. "
+                    + "Update it on GitHub, then retry.";
+            case "blocked" -> "Branch protection is blocking this merge — a required review or status "
+                    + "check is still missing.";
+            case "draft" -> "This pull request is still a draft. Mark it ready for review first.";
+            case "unknown" -> "GitHub is still computing whether this pull request can be merged. "
+                    + "Try again in a few seconds.";
+            default -> "GitHub reports this pull request is not mergeable (state: " + mergeableState + ").";
+        };
     }
 
     // ── reconcile ──────────────────────────────────────────────────────
@@ -386,7 +494,8 @@ public class CodeReviewService {
                 addEvent(rec, "CLOSED_EXTERNALLY", null,
                         "Pull request was closed on GitHub without merging", Instant.now());
             }
-        } else if (APPROVED.equals(reviewStatus) && "clean".equalsIgnoreCase(rec.getMergeableState())) {
+        } else if (APPROVED.equals(reviewStatus)
+                && MERGEABLE_STATES.contains(defaultString(rec.getMergeableState(), "").toLowerCase())) {
             rec.setMergeStatus(READY_TO_MERGE);
         } else if (!MERGING.equals(rec.getMergeStatus())) {
             rec.setMergeStatus(NOT_READY);

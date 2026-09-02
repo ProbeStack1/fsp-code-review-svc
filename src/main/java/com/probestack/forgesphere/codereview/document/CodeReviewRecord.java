@@ -46,11 +46,10 @@ public class CodeReviewRecord {
     private String pullRequestState;     // OPEN | CLOSED | MERGED
     private String headSha;
 
-    private Long reviewTeamId;
-    private String reviewTeamSlug;
-    private String reviewTeamName;
+    /** Every code-review team this PR was routed to (from CI/CD scm.reviewTeams). */
+    private List<ReviewTeamRef> reviewTeams = new ArrayList<>();
     private boolean teamReviewRequested;
-    private String teamReviewNote;       // why the team wasn't/couldn't be requested
+    private String teamReviewNote;       // why the team(s) weren't/couldn't be requested
 
     private int minApprovals = 1;
 
@@ -79,6 +78,20 @@ public class CodeReviewRecord {
     private List<TimelineEvent> events = new ArrayList<>();
 
     // ── embedded types ─────────────────────────────────────────────────
+
+    @Data
+    @NoArgsConstructor
+    public static class ReviewTeamRef {
+        private Long id;
+        private String slug;
+        private String name;
+
+        public ReviewTeamRef(Long id, String slug, String name) {
+            this.id = id;
+            this.slug = slug;
+            this.name = name;
+        }
+    }
 
     @Data
     @NoArgsConstructor
