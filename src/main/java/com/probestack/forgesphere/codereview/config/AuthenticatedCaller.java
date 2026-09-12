@@ -42,6 +42,15 @@ public final class AuthenticatedCaller {
         return token().map(t -> stringClaim(t, "role"));
     }
 
+    /**
+     * The calling user's own organization — used only to tell {@code ServiceTokenClient} which
+     * organization the outbound fsp-cicd-automation-svc call is being made on behalf of. Never a
+     * fixed/placeholder value: each organization gets its own cached service token.
+     */
+    public static Optional<String> organizationId() {
+        return token().map(t -> stringClaim(t, "organization_id")).filter(id -> id != null && !id.isBlank());
+    }
+
     private static String stringClaim(AuthnToken token, String claimName) {
         Object value = token.getClaim(claimName);
         return value == null ? null : value.toString();

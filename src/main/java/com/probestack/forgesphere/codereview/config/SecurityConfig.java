@@ -3,7 +3,6 @@ package com.probestack.forgesphere.codereview.config;
 import com.forge.security.authn.security.ForgeAuthnAuthenticationFilter;
 import jakarta.servlet.Filter;
 import jakarta.servlet.http.HttpServletRequest;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,10 +18,10 @@ import java.util.Optional;
 
 /**
  * The real session credential the browser sends is the HttpOnly {@code ps_auth_token} cookie, not
- * an Authorization header — JavaScript can never read or forward an HttpOnly cookie itself, so
- * {@link CookieToHeaderBridgeFilter} copies it into a synthetic Authorization header, server-side,
- * right before forge-auth-lib's own {@code ForgeAuthnAuthenticationFilter} runs its real
- * JWKS-backed signature/issuer/audience/expiry check.
+ * an Authorization header — JavaScript can never read or forward an HttpOnly cookie itself.
+ * forge-auth-lib's own filter now reads a Bearer token from the Authorization header first,
+ * falling back to that same cookie natively (see {@code forge.authn.token-cookie-name}) only when
+ * the header is absent — no hand-rolled cookie-to-header bridge filter needed here any more.
  * <p>
  * Once a request is authenticated, {@code CodeReviewController} reads identity — email, role — out
  * of the verified token's own claims via {@link AuthenticatedCaller}, not out of the {@code
@@ -80,12 +79,11 @@ public class SecurityConfig {
         return http.build();
     }
 
-    /** Everything else — cookie-bridged, forge-auth-lib-verified when forge.authn is enabled; wide open when it isn't. */
+    /** Everything else — forge-auth-lib-verified (header or cookie, natively); wide open when forge.authn is disabled. */
     @Bean
     @Order(2)
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
-            @Value("${code-review.authn.cookie-name:ps_auth_token}") String authCookieName,
             Optional<ForgeAuthnAuthenticationFilter> forgeAuthnFilter,
             Optional<AuthenticationEntryPoint> authenticationEntryPoint,
             Optional<AccessDeniedHandler> accessDeniedHandler) throws Exception {
@@ -109,7 +107,6 @@ public class SecurityConfig {
         }
 
         http.addFilterAt(forgeAuthnFilter.get(), UsernamePasswordAuthenticationFilter.class);
-        http.addFilterBefore(new CookieToHeaderBridgeFilter(authCookieName), ForgeAuthnAuthenticationFilter.class);
 
         return http.build();
     }

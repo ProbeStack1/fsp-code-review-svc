@@ -1,5 +1,6 @@
 package com.probestack.forgesphere.codereview.client;
 
+import com.probestack.forgesphere.codereview.config.ServiceTokenClient;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
@@ -29,25 +30,29 @@ import java.util.Map;
  *
  * <p>SECURITY: the {@code /cicd-config/{id}/all} response currently includes
  * the decrypted SCM token because the existing merge flow depends on it.
- * That endpoint must move behind a service-to-service credential check
- * before this service ships to production — tracked as plan item "service
- * auth".</p>
+ * fsp-cicd-automation-svc's own endpoint does not enforce a service-to-service credential check
+ * yet — tracked separately as that service's own fix. This client now sends one anyway (see
+ * {@link ServiceTokenClient}): it's a no-op until the receiving end starts validating it, and
+ * means no further change is needed here once it does.</p>
  */
 @Slf4j
 @Component
 public class CicdConfigClient {
 
     private final RestTemplate restTemplate;
+    private final ServiceTokenClient serviceTokenClient;
     private final String cicdBaseUrl;
 
     public CicdConfigClient(RestTemplate restTemplate,
+                            ServiceTokenClient serviceTokenClient,
                             @Value("${cicd.service.url}") String cicdBaseUrl) {
         this.restTemplate = restTemplate;
+        this.serviceTokenClient = serviceTokenClient;
         this.cicdBaseUrl = cicdBaseUrl;
     }
 
     @SuppressWarnings("unchecked")
-    public ScmDetails fetch(String cicdConfigId, String assetType, String userEmail) {
+    public ScmDetails fetch(String cicdConfigId, String assetType, String userEmail, String organizationId) {
         if (userEmail == null || userEmail.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "X-User-Email is required.");
         }
@@ -59,6 +64,18 @@ public class CicdConfigClient {
         String url = cicdBaseUrl + "/" + cicdConfigId + "/all?filtered=true";
         HttpHeaders headers = new HttpHeaders();
         headers.set("X-User-Email", userEmail);
+        if (serviceTokenClient.isEnabled()) {
+            if (organizationId == null || organizationId.isBlank()) {
+                log.warn("No organization id on the calling user's token — skipping the service access token "
+                        + "for this fsp-cicd-automation-svc call (falling back to X-User-Email only).");
+            } else {
+                try {
+                    headers.setBearerAuth(serviceTokenClient.getToken(organizationId));
+                } catch (RuntimeException ex) {
+                    log.warn("Unable to obtain a service access token for fsp-cicd-automation-svc: {}", ex.getMessage());
+                }
+            }
+        }
 
         Map<String, Object> config;
         try {

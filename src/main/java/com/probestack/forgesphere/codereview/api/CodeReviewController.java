@@ -36,19 +36,20 @@ public class CodeReviewController {
     public ResponseEntity<CodeReviewRecord> createPullRequest(
             @PathVariable String microserviceId,
             @Valid @RequestBody CreatePullRequestRequest request) {
-        return ResponseEntity.ok(service.createPullRequest(microserviceId, callerEmail(), callerRole(), request));
+        return ResponseEntity.ok(service.createPullRequest(
+                microserviceId, callerEmail(), callerRole(), callerOrganizationId(), request));
     }
 
     /** Latest review record for this microservice, synced from GitHub first. */
     @GetMapping("/{microserviceId}")
     public ResponseEntity<CodeReviewRecord> getLatest(@PathVariable String microserviceId) {
-        return ResponseEntity.ok(service.getLatest(microserviceId, callerEmail()));
+        return ResponseEntity.ok(service.getLatest(microserviceId, callerEmail(), callerOrganizationId()));
     }
 
     /** Every PR ever raised for this microservice, newest first. */
     @GetMapping("/{microserviceId}/history")
     public ResponseEntity<List<CodeReviewRecord>> history(@PathVariable String microserviceId) {
-        return ResponseEntity.ok(service.history(microserviceId));
+        return ResponseEntity.ok(service.history(microserviceId, callerOrganizationId()));
     }
 
     /**
@@ -58,13 +59,13 @@ public class CodeReviewController {
      */
     @PostMapping("/{microserviceId}/merge")
     public ResponseEntity<CodeReviewRecord> merge(@PathVariable String microserviceId) {
-        return ResponseEntity.ok(service.merge(microserviceId, callerEmail(), callerRole()));
+        return ResponseEntity.ok(service.merge(microserviceId, callerEmail(), callerRole(), callerOrganizationId()));
     }
 
     /** Close the current PR without merging (requester or org admin). Frees a new one to be raised. */
     @PostMapping("/{microserviceId}/close")
     public ResponseEntity<CodeReviewRecord> close(@PathVariable String microserviceId) {
-        return ResponseEntity.ok(service.close(microserviceId, callerEmail(), callerRole()));
+        return ResponseEntity.ok(service.close(microserviceId, callerEmail(), callerRole(), callerOrganizationId()));
     }
 
     /** Post a conversation comment on the current PR (mirrored to GitHub as the calling user). */
@@ -72,7 +73,8 @@ public class CodeReviewController {
     public ResponseEntity<CodeReviewRecord> comment(
             @PathVariable String microserviceId,
             @Valid @RequestBody AddCommentRequest request) {
-        return ResponseEntity.ok(service.addComment(microserviceId, callerEmail(), callerRole(), request.getBody()));
+        return ResponseEntity.ok(service.addComment(
+                microserviceId, callerEmail(), callerRole(), callerOrganizationId(), request.getBody()));
     }
 
     private String callerEmail() {
@@ -81,5 +83,14 @@ public class CodeReviewController {
 
     private String callerRole() {
         return AuthenticatedCaller.role().orElse(null);
+    }
+
+    /**
+     * The calling user's own organization, read from their verified token — passed down only so
+     * the outbound fsp-cicd-automation-svc call can request a service token scoped to the right
+     * organization. Never a fixed value (see AuthenticatedCaller#organizationId's own javadoc).
+     */
+    private String callerOrganizationId() {
+        return AuthenticatedCaller.organizationId().orElse(null);
     }
 }

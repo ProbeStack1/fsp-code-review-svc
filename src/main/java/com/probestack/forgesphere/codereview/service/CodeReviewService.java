@@ -84,20 +84,21 @@ public class CodeReviewService {
     // ── create ─────────────────────────────────────────────────────────
 
     public CodeReviewRecord createPullRequest(String microserviceId, String userEmail, String userRole,
-                                              CreatePullRequestRequest req) {
+                                              String organizationId, CreatePullRequestRequest req) {
         requireEmail(userEmail);
+        requireOrg(organizationId);
         String assetType = req.getAssetType() != null && !req.getAssetType().isBlank()
                 ? req.getAssetType().trim().toUpperCase() : "MICROSERVICE";
 
-        repository.findFirstByMicroserviceIdAndReviewStatusNotInOrderByCreatedAtDesc(
-                        microserviceId, new ArrayList<>(TERMINAL))
+        repository.findFirstByMicroserviceIdAndOrganizationIdAndReviewStatusNotInOrderByCreatedAtDesc(
+                        microserviceId, organizationId, new ArrayList<>(TERMINAL))
                 .ifPresent(open -> {
                     throw new ResponseStatusException(HttpStatus.CONFLICT,
                             "An open pull request (#" + open.getPullRequestNumber()
                                     + ") already exists for this microservice. Merge or close it first.");
                 });
 
-        ScmDetails scm = cicdConfigClient.fetch(req.getCicdConfigId(), assetType, userEmail);
+        ScmDetails scm = cicdConfigClient.fetch(req.getCicdConfigId(), assetType, userEmail, organizationId);
         String owner = scm.owner();
         String repo = req.getRepoName().trim();
         String source = firstNonBlank(req.getSourceBranch(), scm.sourceBranch());
@@ -127,6 +128,7 @@ public class CodeReviewService {
         Instant now = Instant.now();
         CodeReviewRecord rec = new CodeReviewRecord();
         rec.setMicroserviceId(microserviceId);
+        rec.setOrganizationId(organizationId);
         rec.setCicdConfigId(req.getCicdConfigId());
         rec.setAssetType(assetType);
         rec.setRepositoryOwner(owner);
@@ -209,14 +211,16 @@ public class CodeReviewService {
 
     // ── read (+ sync) ──────────────────────────────────────────────────
 
-    public CodeReviewRecord getLatest(String microserviceId, String userEmail) {
+    public CodeReviewRecord getLatest(String microserviceId, String userEmail, String organizationId) {
         requireEmail(userEmail);
-        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+        requireOrg(organizationId);
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdAndOrganizationIdOrderByCreatedAtDesc(
+                        microserviceId, organizationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "No pull request has been created for this microservice yet."));
         if (!TERMINAL.contains(rec.getReviewStatus())) {
             try {
-                ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+                ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail, organizationId);
                 reconcile(rec, scm);
                 rec = repository.save(rec);
             } catch (RuntimeException e) {
@@ -227,15 +231,18 @@ public class CodeReviewService {
         return rec;
     }
 
-    public List<CodeReviewRecord> history(String microserviceId) {
-        return repository.findByMicroserviceIdOrderByCreatedAtDesc(microserviceId);
+    public List<CodeReviewRecord> history(String microserviceId, String organizationId) {
+        requireOrg(organizationId);
+        return repository.findByMicroserviceIdAndOrganizationIdOrderByCreatedAtDesc(microserviceId, organizationId);
     }
 
     // ── merge ──────────────────────────────────────────────────────────
 
-    public CodeReviewRecord merge(String microserviceId, String userEmail, String userRole) {
+    public CodeReviewRecord merge(String microserviceId, String userEmail, String userRole, String organizationId) {
         requireEmail(userEmail);
-        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+        requireOrg(organizationId);
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdAndOrganizationIdOrderByCreatedAtDesc(
+                        microserviceId, organizationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "No pull request has been created for this microservice yet."));
 
@@ -249,7 +256,7 @@ public class CodeReviewService {
                     "Only the developer who raised this pull request, or an org admin, can merge it.");
         }
 
-        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail, organizationId);
         reconcile(rec, scm);
 
         if (TERMINAL.contains(rec.getReviewStatus())) {
@@ -314,9 +321,11 @@ public class CodeReviewService {
 
     // ── close (without merging) ────────────────────────────────────────
 
-    public CodeReviewRecord close(String microserviceId, String userEmail, String userRole) {
+    public CodeReviewRecord close(String microserviceId, String userEmail, String userRole, String organizationId) {
         requireEmail(userEmail);
-        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+        requireOrg(organizationId);
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdAndOrganizationIdOrderByCreatedAtDesc(
+                        microserviceId, organizationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "No pull request has been created for this microservice yet."));
 
@@ -330,7 +339,7 @@ public class CodeReviewService {
                     "Only the developer who raised this pull request, or an org admin, can close it.");
         }
 
-        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail, organizationId);
         try {
             gitHubClient.closePullRequest(rec.getRepositoryOwner(), rec.getRepositoryName(),
                     scm.token(), rec.getPullRequestNumber());
@@ -350,12 +359,15 @@ public class CodeReviewService {
     // ── comment ───────────────────────────────────────────────────────
 
     /** Post a conversation comment on the current PR as the calling user, then sync it back. */
-    public CodeReviewRecord addComment(String microserviceId, String userEmail, String userRole, String body) {
+    public CodeReviewRecord addComment(String microserviceId, String userEmail, String userRole,
+                                       String organizationId, String body) {
         requireEmail(userEmail);
+        requireOrg(organizationId);
         if (body == null || body.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Comment body is required.");
         }
-        CodeReviewRecord rec = repository.findFirstByMicroserviceIdOrderByCreatedAtDesc(microserviceId)
+        CodeReviewRecord rec = repository.findFirstByMicroserviceIdAndOrganizationIdOrderByCreatedAtDesc(
+                        microserviceId, organizationId)
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "No pull request has been created for this microservice yet."));
         if (MERGED.equals(rec.getReviewStatus())) {
@@ -363,7 +375,7 @@ public class CodeReviewService {
                     "This pull request is already merged.");
         }
 
-        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail);
+        ScmDetails scm = cicdConfigClient.fetch(rec.getCicdConfigId(), rec.getAssetType(), userEmail, organizationId);
         gitHubClient.addIssueComment(rec.getRepositoryOwner(), rec.getRepositoryName(),
                 scm.token(), rec.getPullRequestNumber(), body.strip());
 
@@ -548,6 +560,14 @@ public class CodeReviewService {
     private static void requireEmail(String email) {
         if (email == null || email.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "X-User-Email header is required.");
+        }
+    }
+
+    /** Every finder is scoped by organization — a caller whose token carries none can't act at all. */
+    private static void requireOrg(String organizationId) {
+        if (organizationId == null || organizationId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN,
+                    "The calling user's token has no organization — cannot resolve which organization's pull request this is.");
         }
     }
 

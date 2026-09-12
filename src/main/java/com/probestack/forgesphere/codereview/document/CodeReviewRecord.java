@@ -30,6 +30,10 @@ public class CodeReviewRecord {
     @Indexed
     private String microserviceId;
 
+    /** Owning organization — the creating user's own organization_id claim, never client-supplied. Every lookup is scoped by this + microserviceId so one organization can never read or act on another's pull request. */
+    @Indexed
+    private String organizationId;
+
     /** Onboarding id — the key CI/CD config is stored under; needed to re-read SCM on every sync. */
     private String cicdConfigId;
 
